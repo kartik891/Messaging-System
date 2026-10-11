@@ -42,22 +42,11 @@ Run these commands from the `Message/` directory.
 g++ -std=c++17 -Wall -Wextra -Wpedantic main.cpp ClientSide/Client.cpp -pthread -o Client
 ```
 
-The free functions defined in `Protocol.h` must be marked `inline`, or
-their definitions should be moved into a separate `Protocol.cpp` file
-compiled exactly once. Otherwise, the client may fail with
-multiple-definition linker errors.
-
 ### Server
-
-The current `ServerSide/server.cpp` includes `handleClient.cpp`
-directly, so compile only the server entry point:
 
 ``` bash
 g++ -std=c++17 -Wall -Wextra -Wpedantic ServerSide/server.cpp -pthread -o server
 ```
-
-Do not also compile `ServerSide/handleClient.cpp` in that command while
-it is included directly by `server.cpp`.
 
 ## Run
 
@@ -160,8 +149,3 @@ and connect two clients, then check all three terminals for errors.
 6.  Make host and port configurable.
 7.  Add authentication and TLS if the project is extended beyond local
     experimentation.
-
-## License
-
-No license has been specified. Add one before distributing the project
-publicly.
