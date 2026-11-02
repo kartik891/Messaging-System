@@ -47,9 +47,4 @@ void handleClient(int receiveSocket, int sendSocket)
 
     // Each handler closes only its own client socket.
     close(receiveSocket);
-
-    std::cout
-        << "Thread finished: "
-        << std::this_thread::get_id()
-        << std::endl;
 }

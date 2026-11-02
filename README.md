@@ -137,15 +137,3 @@ definitions into `Protocol.cpp` and compile that file exactly once.
 
 The current server expects two clients for a session. Start the server
 and connect two clients, then check all three terminals for errors.
-
-## Possible Improvements
-
-1.  Use nonblocking sockets with incremental frame parsing.
-2.  Coordinate session shutdown and socket ownership.
-3.  Iterate through all `getaddrinfo()` results.
-4.  Add `SO_REUSEADDR` and improve `accept()` error handling.
-5.  Add tests for partial reads, disconnects, and malformed message
-    lengths.
-6.  Make host and port configurable.
-7.  Add authentication and TLS if the project is extended beyond local
-    experimentation.

@@ -74,7 +74,7 @@ inline ReceiveStatus receiveWholeMessage(int fd, void *msg, size_t length)
         }
 
         received += static_cast<ssize_t>(n);
-    }
+    }    
 
     return ReceiveStatus::OK;
 }
@@ -93,7 +93,7 @@ inline bool sendLongMessage(int fd, const std::string &message)
     if (!message.empty() &&
         !sendWholeMessage(fd, message.data(), message.size()))
         return false;
-
+    
     return true;
 }
 
@@ -117,7 +117,7 @@ inline ReceiveStatus receiveLongMessage(
 
     if (length == 0)
         return ReceiveStatus::OK;
-
+    
     status = receiveWholeMessage(fd, message.data(), length);
 
     if (status != ReceiveStatus::OK)

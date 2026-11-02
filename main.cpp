@@ -3,6 +3,7 @@
 #include <poll.h>
 #include <unistd.h>
 #include <cerrno>
+#include <openssl/bio.h>
 #include "ClientSide/Client.h"
 
 int main(int argc, char* argv[]) {
@@ -13,9 +14,13 @@ int main(int argc, char* argv[]) {
 
     Client cli(argv[1]);
 
-    if (!cli.makeConnection("localhost", "9000")) {
+    BIO* ConnObj = cli.makeConnection("localhost", "9000");
+
+    if(ConnObj == nullptr){
         return 1;
     }
+
+    std::cout << "BIO OBJ: " << ConnObj << std::endl;
 
     pollfd fds[2]{};
 
@@ -63,12 +68,12 @@ int main(int argc, char* argv[]) {
             }
 
             if (status == ReceiveStatus::OK) {
-                if (incoming == "/quit") {
+                if (incoming == "/quit" || incoming == "") {
                     std::cout << "\nOther client disconnected\n";
                     break;
                 }
-
-                std::cout << "\nMessage: " << incoming << "\n> "
+                
+                std::cout << "\nReceived Message: " << incoming << "\n"
                           << std::flush;
             }
         }
@@ -77,16 +82,15 @@ int main(int argc, char* argv[]) {
         if (fds[0].revents & POLLIN) {
             if (!std::getline(std::cin, msg))
                 break;
-
+             
             if (!cli.sendMessage(msg)) {
                 std::cerr << "Failed to send message\n";
                 break;
             }
 
-            if (msg == "/quit")
+            if (msg == "/quit" || msg == "")
                 break;
 
-            std::cout << "> " << std::flush;
         }
     }
 
