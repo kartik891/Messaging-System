@@ -8,15 +8,17 @@
 #include <thread>
 #include <unistd.h>
 #include <iostream>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
-void handleClient(int receiveSocket, int sendSocket)
+void handleClient(SSL* receiveSSL, SSL* sendSSL, int receiveSocket, int sendSocket)
 {
     std::string message;
 
     while (true)
     {
         ReceiveStatus status =
-            receiveLongMessage(receiveSocket, message);
+            receiveMessage(receiveSSL, message);
 
         if (status != ReceiveStatus::OK)
         {
@@ -31,11 +33,11 @@ void handleClient(int receiveSocket, int sendSocket)
         if (message == "/quit")
         {
             // Forward the framed quit message.
-            sendLongMessage(sendSocket, message);
+            sendMessage(sendSSL, message);
             break;
         }
 
-        if (!sendLongMessage(sendSocket, message))
+        if (!sendMessage(sendSSL, message))
         {
             std::cerr << "Failed to forward message\n";
             break;

@@ -6,20 +6,28 @@
 #include <thread>
 #include <unistd.h>
 #include <iostream>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "handleClient.cpp"
+#include "sslFunctions.cpp"
 
 #define MYPORT "9000"
 #define BACKLOG 10
 
-int main() 
+int main()
 {
     struct sockaddr_storage their_addr;
     socklen_t addr_size;
-
+    SSL_CTX *ctx = nullptr;
     struct addrinfo hints, *res;
+    int sockfd = -1;
 
-    int sockfd;
+    ctx = createServerContext();
+    if (ctx == nullptr)
+    {
+        return 1;
+    }
 
     memset(&hints, 0, sizeof hints);
 
@@ -71,32 +79,74 @@ int main()
     {
         addr_size = sizeof(their_addr);
 
-        int clientA = accept(
-            sockfd,
-            (struct sockaddr*)&their_addr,
-            &addr_size
-        );
+        int clientA = accept(sockfd, (struct sockaddr *)&their_addr, &addr_size);
 
         if (clientA == -1)
         {
             perror("accept");
-            continue;
+            return -1;
         }
 
-        int clientB = accept(
-            sockfd,
-            (struct sockaddr*)&their_addr,
-            &addr_size
-        );
+        SSL *clientA_ssl = SSL_new(ctx);
+
+        if (clientA_ssl == nullptr)
+        {
+            ERR_print_errors_fp(stderr);
+            close(clientA);
+            return -1;
+        }
+
+        if (SSL_set_fd(clientA_ssl, clientA) != 1)
+        {
+            ERR_print_errors_fp(stderr);
+            SSL_free(clientA_ssl);
+            close(clientA);
+            return -1;
+        }
+
+        if (SSL_accept(clientA_ssl) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            SSL_free(clientA_ssl);
+            close(clientA);
+            return -1;
+        }
+
+        int clientB = accept(sockfd, (struct sockaddr *)&their_addr, &addr_size);
 
         if (clientB == -1)
         {
             perror("accept");
-            continue;
+            return -1;
         }
 
-        std::thread(handleClient, clientA, clientB).detach();
-        std::thread(handleClient, clientB, clientA).detach();
+        SSL *clientB_ssl = SSL_new(ctx);
+
+        if (clientB_ssl == nullptr)
+        {
+            ERR_print_errors_fp(stderr);
+            close(clientB);
+            return -1;
+        }
+
+        if (SSL_set_fd(clientB_ssl, clientB) != 1)
+        {
+            ERR_print_errors_fp(stderr);
+            SSL_free(clientB_ssl);
+            close(clientB);
+            return -1;
+        }
+
+        if (SSL_accept(clientB_ssl) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            SSL_free(clientB_ssl);
+            close(clientB);
+            return -1;
+        }
+
+        std::thread(handleClient, clientA_ssl, clientB_ssl, clientA, clientB).detach();
+        std::thread(handleClient, clientB_ssl, clientA_ssl, clientA, clientB).detach();
     }
 
     close(sockfd);

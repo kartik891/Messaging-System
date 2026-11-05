@@ -2,14 +2,17 @@
 #define PROTOCOL_H
 
 #include <sys/socket.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
 #include <cstdint>
 #include <string>
 #include <limits>
 #include <cerrno>
 #include <cstdio>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <iostream>
 
 enum class ReceiveStatus
 {
@@ -21,7 +24,7 @@ enum class ReceiveStatus
 
 const uint32_t MAXSIZE = 1024 * 1024;
 
-inline bool sendWholeMessage(int fd, const void *msg, size_t length)
+inline bool sendWholeMessage(SSL* ssl, const void *msg, size_t length)
 {
 
     const char *ptr = static_cast<const char *>(msg);
@@ -30,101 +33,106 @@ inline bool sendWholeMessage(int fd, const void *msg, size_t length)
     while (sent < length)
     {
 
-        ssize_t n = send(fd, ptr + sent, length - sent, MSG_NOSIGNAL);
+        size_t bytesWritten = 0; 
+        int result = SSL_write_ex(ssl, ptr + sent, length - sent, &bytesWritten);
 
-        if (n < 0)
+        if (result != 1)
         {
-            if (errno == EINTR)
-            {
+            int error = SSL_get_error(ssl, result);
+            if(error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE){
                 continue;
             }
-            perror("send");
+
+            std::cerr << "Error while sending\n";
             return false;
         }
 
-        if (n == 0)
-        {
-            return false;
-        }
-
-        sent += static_cast<size_t>(n);
+        sent += bytesWritten;
+        continue;
     }
 
     return true;
 }
 
-inline ReceiveStatus receiveWholeMessage(int fd, void *msg, size_t length)
+inline ReceiveStatus receiveWholeMessage(SSL* ssl, void *msg, size_t length)
 {
     char *ptr = static_cast<char *>(msg);
     size_t received = 0;
 
     while (received < length)
     {
-        ssize_t n = recv(fd, ptr + received, length - received, 0);
+        size_t readBytes = 0;
+        int result = SSL_read_ex(ssl, ptr + received, length - received, &readBytes);
 
-        if (n < 0)
-        {
-            perror("recieve");
-            return ReceiveStatus::Error;
+        if (result == 1) {
+            received += readBytes;
+            continue;
         }
 
-        if (n == 0)
-        {
+        int error = SSL_get_error(ssl, result);
+
+        if (error == SSL_ERROR_WANT_READ ||
+            error == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+
+        if (error == SSL_ERROR_ZERO_RETURN) {
+            std::cerr << "TLS connection closed gracefully\n";
             return ReceiveStatus::Disconnected;
+        } else {
+            ERR_print_errors_fp(stderr);
         }
 
-        received += static_cast<ssize_t>(n);
+        return ReceiveStatus::Error;
     }    
 
     return ReceiveStatus::OK;
 }
 
-inline bool sendLongMessage(int fd, const std::string &message)
+inline bool sendMessage(SSL* ssl, const std::string &message)
 {
-    if (message.size() > MAXSIZE)
+    if (ssl ==nullptr)
+    {
         return false;
+    }
 
-    uint32_t length = htonl(
-        static_cast<uint32_t>(message.size()));
+    uint32_t messageLength = htonl(message.size());
 
-    if (!sendWholeMessage(fd, &length, sizeof(length)))
+    if(!sendWholeMessage(ssl, &messageLength, sizeof(messageLength))){
         return false;
+    }
 
-    if (!message.empty() &&
-        !sendWholeMessage(fd, message.data(), message.size()))
+    if(!sendWholeMessage(ssl, message.data(), message.size())){
         return false;
-    
+    }
+
     return true;
 }
 
-inline ReceiveStatus receiveLongMessage(
-    int fd, std::string &message)
+inline ReceiveStatus receiveMessage(SSL* ssl, std::string& message)
 {
-    uint32_t networkLength = 0;
+    if (ssl == nullptr)
+        return ReceiveStatus::Error;
 
-    ReceiveStatus status = receiveWholeMessage(
-        fd, &networkLength, sizeof(networkLength));
+    uint32_t networkLength;
+    ReceiveStatus status = receiveWholeMessage(ssl, &networkLength, sizeof(networkLength));
 
     if (status != ReceiveStatus::OK)
         return status;
 
-    uint32_t length = ntohl(networkLength);
+    uint32_t messageLength = ntohl(networkLength);
 
-    if (length > MAXSIZE)
+    if (messageLength > MAXSIZE) {
+        std::cerr << "Message exceeds maximum allowed size\n";
         return ReceiveStatus::Error;
+    }
 
-    message.resize(length);
+    message.resize(messageLength);
 
-    if (length == 0)
+    if (messageLength == 0)
         return ReceiveStatus::OK;
-    
-    status = receiveWholeMessage(fd, message.data(), length);
 
-    if (status != ReceiveStatus::OK)
-        message.clear();
-
-    return status;
+    return receiveWholeMessage(ssl, message.data(), messageLength);
 }
-
 
 #endif

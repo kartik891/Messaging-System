@@ -20,6 +20,7 @@ public:
     SSL_CTX *makeContext();
     bool makeConnection(const char *host, const char *port);
     SSL* createSSLObject(const char* host);
+    SSL* getSSL();
     bool sendMessage(const std::string &message);
     ReceiveStatus receiveMessage(std::string &message);
     void shutdownConnection();

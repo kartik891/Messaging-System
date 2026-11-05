@@ -40,7 +40,7 @@ SSL_CTX* Client::makeContext(){
 
     SSL_CTX_set_verify(currContext, SSL_VERIFY_PEER, NULL);
 
-    if (SSL_CTX_set_default_verify_paths(currContext) != 1) {
+    if (SSL_CTX_load_verify_locations(currContext, "../certs/ca.cert", nullptr) != 1) {
         printf("Failed to set the default trusted certificate store\n");
         SSL_CTX_free(currContext);
         return nullptr;
@@ -200,23 +200,54 @@ SSL* Client::createSSLObject(const char* host)
     return ssl;
 }
 
+SSL* Client::getSSL(){
+    return ssl;
+}
+
 bool Client::sendMessage(const std::string &message)
 {
-    if (sockfd == -1)
+    if (ssl ==nullptr)
     {
         return false;
     }
 
-    return sendLongMessage(sockfd, message);
+    uint32_t messageLength = htonl(message.size());
+
+    if(!sendWholeMessage(ssl, &messageLength, sizeof(messageLength))){
+        return false;
+    }
+
+    if(!sendWholeMessage(ssl, message.data(), message.size())){
+        return false;
+    }
+
+    return true;
 }
 
 ReceiveStatus Client::receiveMessage(std::string& message)
 {
-    if(sockfd == -1){
-        return ReceiveStatus::Disconnected;
+    if (ssl == nullptr)
+        return ReceiveStatus::Error;
+
+    uint32_t networkLength;
+    ReceiveStatus status = receiveWholeMessage(ssl, &networkLength, sizeof(networkLength));
+
+    if (status != ReceiveStatus::OK)
+        return status;
+
+    uint32_t messageLength = ntohl(networkLength);
+
+    if (messageLength > MAXSIZE) {
+        std::cerr << "Message exceeds maximum allowed size\n";
+        return ReceiveStatus::Error;
     }
 
-    return receiveLongMessage(sockfd, message);
+    message.resize(messageLength);
+
+    if (messageLength == 0)
+        return ReceiveStatus::OK;
+
+    return receiveWholeMessage(ssl, message.data(), messageLength);
 }
 
 void Client::shutdownConnection()
@@ -229,6 +260,11 @@ void Client::shutdownConnection()
 
 void Client::closeConnection()
 {
+    if(ssl != nullptr){
+        SSL_free(ssl);
+        ssl = nullptr;
+    }
+
     if (sockfd != -1)
     {
         close(sockfd);

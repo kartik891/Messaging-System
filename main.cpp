@@ -14,13 +14,10 @@ int main(int argc, char* argv[]) {
 
     Client cli(argv[1]);
 
-    BIO* ConnObj = cli.makeConnection("localhost", "9000");
-
-    if(ConnObj == nullptr){
+    if(!cli.makeConnection("localhost", "9000")){
+        std::cerr << "Failed to create Connection.\n";
         return 1;
     }
-
-    std::cout << "BIO OBJ: " << ConnObj << std::endl;
 
     pollfd fds[2]{};
 
