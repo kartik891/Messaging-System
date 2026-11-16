@@ -1,278 +1,203 @@
 #include "Client.h"
-#include "../Protocol.h"
 
-#include <sys/types.h>
-#include <sys/socket.h>
-
-#include <netdb.h>
-#include <cstring>
-#include <unistd.h>
-#include <utility>
-#include <iostream>
-#include <poll.h>
-#include <string>
-#include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
-SSL_CTX* Client::ctx = nullptr;
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <iostream>
 
 Client::Client(std::string username)
-{
-    sockfd = -1;
-    this->username = username;
-    bio = nullptr;
-    ssl = nullptr;
-}
+    : username(std::move(username)) {}
 
-SSL_CTX* Client::makeContext(){
-    if(ctx != nullptr){
+SSL_CTX* Client::makeContext() {
+    if (ctx != nullptr)
         return ctx;
-    }
 
-    SSL_CTX* currContext = nullptr;
-    currContext = SSL_CTX_new(TLS_client_method());
-
-    if(currContext == nullptr){
-        std::cerr << "failed to create Context" << std::endl;
+    SSL_CTX* newContext = SSL_CTX_new(TLS_client_method());
+    if (newContext == nullptr) {
+        std::cerr << "Failed to create TLS client context\n";
+        ERR_print_errors_fp(stderr);
         return nullptr;
     }
 
-    SSL_CTX_set_verify(currContext, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify(newContext, SSL_VERIFY_PEER, nullptr);
 
-    if (SSL_CTX_load_verify_locations(currContext, "../certs/ca.cert", nullptr) != 1) {
-        printf("Failed to set the default trusted certificate store\n");
-        SSL_CTX_free(currContext);
+    // Run the client from the project root directory.
+    if (SSL_CTX_load_verify_locations(
+            newContext, "certs/ca.cert", nullptr) != 1) {
+        std::cerr << "Failed to load certs/ca.cert\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(newContext);
         return nullptr;
     }
 
-    if (SSL_CTX_set_min_proto_version(currContext, TLS1_2_VERSION) != 1) {
-        printf("Failed to set the minimum TLS protocol version\n");
-        SSL_CTX_free(currContext);
+    if (SSL_CTX_set_min_proto_version(newContext, TLS1_2_VERSION) != 1) {
+        std::cerr << "Failed to set minimum TLS version\n";
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(newContext);
         return nullptr;
     }
 
-    ctx = currContext;
+    ctx = newContext;
     return ctx;
 }
 
-SSL_CTX* Client::getCTX(){
+SSL_CTX* Client::getCTX() const {
     return ctx;
 }
 
-int Client::getSockfd(){
+int Client::getSockfd() const {
     return sockfd;
 }
 
-bool Client::makeConnection(const char *host, const char *port)
-{
-    if(sockfd != -1){
-        std::cout << "Connetion already established\n"; 
+SSL* Client::getSSL() const {
+    return ssl;
+}
+
+bool Client::makeConnection(const char* host, const char* port) {
+    if (sockfd != -1) {
+        std::cerr << "TCP connection already established\n";
         return true;
     }
 
-    BIO_ADDRINFO *res = nullptr;
+    BIO_ADDRINFO* resultList = nullptr;
+    const int lookupResult = BIO_lookup_ex(
+        host, port, BIO_LOOKUP_CLIENT, AF_UNSPEC, SOCK_STREAM, 0, &resultList
+    );
 
-    int status = BIO_lookup_ex(host, port, BIO_LOOKUP_CLIENT, AF_UNSPEC, SOCK_STREAM, 0, &res);
-
-    if (status != 1)
-    {
-        std::cerr << "BIO_Lookup_ex Error";
+    if (lookupResult != 1) {
+        std::cerr << "BIO_lookup_ex failed\n";
         ERR_print_errors_fp(stderr);
         return false;
     }
 
-    for(const BIO_ADDRINFO* ai = res; ai != nullptr; ai = BIO_ADDRINFO_next(ai)){
-        int currSock = BIO_socket(BIO_ADDRINFO_family(ai), SOCK_STREAM, 0, 0);
+    for (const BIO_ADDRINFO* address = resultList;
+         address != nullptr;
+         address = BIO_ADDRINFO_next(address)) {
 
-        if(currSock == -1){
+        const int candidate = BIO_socket(
+            BIO_ADDRINFO_family(address), SOCK_STREAM, 0, 0
+        );
+        if (candidate == -1)
+            continue;
+
+        if (BIO_connect(candidate, BIO_ADDRINFO_address(address), 0) != 1) {
+            BIO_closesocket(candidate);
             continue;
         }
 
-        if(BIO_connect(currSock, BIO_ADDRINFO_address(ai), 0) != 1){
-            BIO_closesocket(currSock);
-            continue;
-        }
-
-        sockfd = currSock;
+        sockfd = candidate;
         break;
     }
 
-    // make a socket, bind it, and listen on it:
+    BIO_ADDRINFO_free(resultList);
 
-    BIO_ADDRINFO_free(res);
-
-    if (sockfd == -1)
-    {
-        std::cerr << "Failed to connect" << std::endl;
+    if (sockfd == -1) {
+        std::cerr << "Failed to establish TCP connection to "
+                  << host << ':' << port << '\n';
         return false;
     }
 
     return true;
 }
 
-
-SSL* Client::createSSLObject(const char* host)
-{
-    if (ctx == nullptr)
-    {
-        std::cerr << "SSL context is not initialized\n";
+SSL* Client::createSSLObject(const char* host) {
+    if (ctx == nullptr || sockfd == -1) {
+        std::cerr << "Create TLS context and TCP connection before TLS setup\n";
         return nullptr;
     }
 
-    if (sockfd == -1)
-    {
-        std::cerr << "TCP connection is not established\n";
+    if (ssl != nullptr) {
+        std::cerr << "TLS connection already initialized\n";
         return nullptr;
     }
 
-    if(ssl != nullptr){
-        std::cerr << "SSL Object already created\n";
-        return nullptr; 
-    }
-
-    SSL* currSSL = SSL_new(ctx);
-
-    if (currSSL == nullptr)
-    {
-        std::cerr << "Failed to create SSL object\n";
+    SSL* newSSL = SSL_new(ctx);
+    if (newSSL == nullptr) {
         ERR_print_errors_fp(stderr);
         return nullptr;
     }
 
-    if (SSL_set_fd(currSSL, sockfd) != 1)
-    {
-        std::cerr << "Failed to attach socket to SSL object\n";
+    if (SSL_set_fd(newSSL, sockfd) != 1) {
         ERR_print_errors_fp(stderr);
-        SSL_free(currSSL);
+        SSL_free(newSSL);
         return nullptr;
     }
 
-    // Set SNI: tells the server which hostname we want.
-    if (SSL_set_tlsext_host_name(currSSL, host) != 1)
-    {
-        std::cerr << "Failed to set SNI hostname\n";
+    if (SSL_set_tlsext_host_name(newSSL, host) != 1) {
         ERR_print_errors_fp(stderr);
-        SSL_free(currSSL);
+        SSL_free(newSSL);
         return nullptr;
     }
 
-    // Verify that the server certificate matches the hostname.
-    if (SSL_set1_host(currSSL, host) != 1)
-    {
-        std::cerr << "Failed to configure hostname verification\n";
+    if (SSL_set1_host(newSSL, host) != 1) {
         ERR_print_errors_fp(stderr);
-        SSL_free(currSSL);
+        SSL_free(newSSL);
         return nullptr;
     }
 
-    // Perform the TLS handshake.
-    int result = SSL_connect(currSSL);
-
-    if (result != 1)
-    {
-        int error = SSL_get_error(currSSL, result);
-
-        std::cerr << "TLS handshake failed. SSL error: "
-                  << error << '\n';
-
+    // The socket is blocking during this handshake. It becomes nonblocking
+    // after createSSLObject() returns and before NetworkHandler starts.
+    const int result = SSL_connect(newSSL);
+    if (result != 1) {
+        const int sslError = SSL_get_error(newSSL, result);
+        std::cerr << "TLS handshake failed. SSL error: " << sslError << '\n';
         ERR_print_errors_fp(stderr);
 
-        long verifyResult = SSL_get_verify_result(currSSL);
-
-        if (verifyResult != X509_V_OK)
-        {
+        const long verifyResult = SSL_get_verify_result(newSSL);
+        if (verifyResult != X509_V_OK) {
             std::cerr << "Certificate verification failed: "
-                      << X509_verify_cert_error_string(verifyResult)
-                      << '\n';
+                      << X509_verify_cert_error_string(verifyResult) << '\n';
         }
 
-        SSL_free(currSSL);
+        SSL_free(newSSL);
         return nullptr;
     }
 
+    ssl = newSSL;
+
     std::cout << "TLS handshake successful\n"
-              << "Protocol: " << SSL_get_version(currSSL) << '\n'
-              << "Cipher: "
-              << SSL_get_cipher(currSSL) << '\n';
+              << "Protocol: " << SSL_get_version(ssl) << '\n'
+              << "Cipher: " << SSL_get_cipher(ssl) << '\n';
 
-    ssl = currSSL;
     return ssl;
 }
 
-SSL* Client::getSSL(){
-    return ssl;
-}
-
-bool Client::sendMessage(const std::string &message)
-{
-    if (ssl ==nullptr)
-    {
-        return false;
-    }
-
-    uint32_t messageLength = htonl(message.size());
-
-    if(!sendWholeMessage(ssl, &messageLength, sizeof(messageLength))){
-        return false;
-    }
-
-    if(!sendWholeMessage(ssl, message.data(), message.size())){
-        return false;
-    }
-
-    return true;
-}
-
-ReceiveStatus Client::receiveMessage(std::string& message)
-{
-    if (ssl == nullptr)
-        return ReceiveStatus::Error;
-
-    uint32_t networkLength;
-    ReceiveStatus status = receiveWholeMessage(ssl, &networkLength, sizeof(networkLength));
-
-    if (status != ReceiveStatus::OK)
-        return status;
-
-    uint32_t messageLength = ntohl(networkLength);
-
-    if (messageLength > MAXSIZE) {
-        std::cerr << "Message exceeds maximum allowed size\n";
-        return ReceiveStatus::Error;
-    }
-
-    message.resize(messageLength);
-
-    if (messageLength == 0)
-        return ReceiveStatus::OK;
-
-    return receiveWholeMessage(ssl, message.data(), messageLength);
-}
-
-void Client::shutdownConnection()
-{
-    if (sockfd != -1)
-    {
-        shutdown(sockfd, SHUT_RDWR);
+void Client::shutdownConnection() {
+    // Called only after NetworkHandler has joined, so this thread now owns SSL.
+    // A return value of 0 means our close_notify was sent and the peer reply
+    // has not yet been read. That is sufficient for this short-lived client.
+    if (ssl != nullptr) {
+        const int result = SSL_shutdown(ssl);
+        if (result < 0) {
+            const int error = SSL_get_error(ssl, result);
+            if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
+                std::cerr << "TLS shutdown reported an error\n";
+                ERR_print_errors_fp(stderr);
+            }
+        }
     }
 }
 
-void Client::closeConnection()
-{
-    if(ssl != nullptr){
+void Client::closeConnection() {
+    if (ssl != nullptr) {
         SSL_free(ssl);
         ssl = nullptr;
     }
 
-    if (sockfd != -1)
-    {
-        close(sockfd);
+    if (sockfd != -1) {
+        ::close(sockfd);
         sockfd = -1;
     }
 }
 
-Client::~Client()
-{
+Client::~Client() {
     closeConnection();
+
+    if (ctx != nullptr) {
+        SSL_CTX_free(ctx);
+        ctx = nullptr;
+    }
 }

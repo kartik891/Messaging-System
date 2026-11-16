@@ -1,98 +1,137 @@
-
 #include <iostream>
+#include <thread>
+#include <atomic>
+#include <string>
+#include <cerrno>
+
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
-#include <cerrno>
-#include <openssl/bio.h>
+
 #include "ClientSide/Client.h"
+#include "ClientSide/messageQueue.h"
+#include "ClientSide/networkHandler.h"
+
+namespace {
+bool setNonBlocking(int fd) {
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl(F_GETFL)");
+        return false;
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl(F_SETFL)");
+        return false;
+    }
+
+    return true;
+}
+}
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
+    if (argc != 2) {
         std::cerr << "Usage: ./Client <username>\n";
         return 1;
     }
 
-    Client cli(argv[1]);
+    Client client(argv[1]);
 
-    if(!cli.makeConnection("localhost", "9000")){
-        std::cerr << "Failed to create Connection.\n";
+    // The order matters: context -> TCP -> TLS handshake -> nonblocking I/O.
+    if (client.makeContext() == nullptr) {
+        std::cerr << "Could not initialize TLS context\n";
         return 1;
     }
 
-    pollfd fds[2]{};
+    if (!client.makeConnection("localhost", "9000")) {
+        std::cerr << "TCP connection failed\n";
+        return 1;
+    }
 
-    // Monitor keyboard input.
-    fds[0].fd = STDIN_FILENO;
-    fds[0].events = POLLIN;
+    if (client.createSSLObject("localhost") == nullptr) {
+        std::cerr << "TLS connection failed\n";
+        client.closeConnection();
+        return 1;
+    }
 
-    // Monitor messages from the server.
-    fds[1].fd = cli.getSockfd();
-    fds[1].events = POLLIN;
+    if (!setNonBlocking(client.getSockfd())) {
+        client.closeConnection();
+        return 1;
+    }
 
-    std::string msg;
-    bool running = true;
+    MessageQueue incoming;
+    MessageQueue outgoing;
+    std::atomic<bool> running{true};
 
+    NetworkHandler network(
+        client.getSSL(),
+        client.getSockfd(),
+        incoming,
+        outgoing,
+        running
+    );
+
+    // This is the only thread that performs SSL I/O on this SSL object.
+    std::thread networkThread(&NetworkHandler::run, &network);
+
+    // Display thread only consumes the incoming queue.
+    std::thread displayThread([&]() {
+        std::string received;
+        while (incoming.waitPop(received)) {
+            std::cout << "\nReceived: " << received << '\n'
+                      << std::flush;
+        }
+    });
+
+    std::cout << "Connected as " << argv[1]
+              << ". Type /quit to leave.\n";
+
+    // Poll stdin periodically so a remote disconnect can stop the input loop.
     while (running) {
-        int result = poll(fds, 2, -1);
+        pollfd inputFd{};
+        inputFd.fd = STDIN_FILENO;
+        inputFd.events = POLLIN;
 
-        if (result < 0) {
+        const int pollResult = poll(&inputFd, 1, 200);
+        if (pollResult < 0) {
             if (errno == EINTR)
                 continue;
-
-            perror("poll");
+            perror("stdin poll");
             break;
         }
 
-        // Check the socket first.
-        if (fds[1].revents & POLLNVAL) {
-            std::cerr << "Invalid socket\n";
+        if (pollResult == 0)
+            continue;
+
+        if (inputFd.revents & (POLLERR | POLLNVAL))
             break;
-        }
 
-        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
-            std::string incoming;
-
-            ReceiveStatus status = cli.receiveMessage(incoming);
-
-            if (status == ReceiveStatus::Disconnected) {
-                std::cout << "\nServer disconnected\n";
-                break;
-            }
-
-            if (status == ReceiveStatus::Error) {
-                std::cerr << "\nError receiving message\n";
-                break;
-            }
-
-            if (status == ReceiveStatus::OK) {
-                if (incoming == "/quit" || incoming == "") {
-                    std::cout << "\nOther client disconnected\n";
-                    break;
-                }
-                
-                std::cout << "\nReceived Message: " << incoming << "\n"
-                          << std::flush;
-            }
-        }
-
-        // Check keyboard input.
-        if (fds[0].revents & POLLIN) {
-            if (!std::getline(std::cin, msg))
-                break;
-             
-            if (!cli.sendMessage(msg)) {
-                std::cerr << "Failed to send message\n";
-                break;
-            }
-
-            if (msg == "/quit" || msg == "")
+        if (inputFd.revents & (POLLIN | POLLHUP)) {
+            std::string message;
+            if (!std::getline(std::cin, message))
                 break;
 
+            if (!outgoing.push(message))
+                break;
+
+            if (message == "/quit")
+                break;
         }
     }
 
-    cli.shutdownConnection();
-    cli.closeConnection();
+    // Close the queue to new messages, but NetworkHandler drains anything
+    // already queued before it exits.
+    outgoing.close();
+    running = false;
+
+    networkThread.join();
+
+    incoming.close();
+    displayThread.join();
+
+    // No thread is using SSL now. Force-close the transport and release TLS.
+    client.shutdownConnection();
+    client.closeConnection();
 
     return 0;
 }
